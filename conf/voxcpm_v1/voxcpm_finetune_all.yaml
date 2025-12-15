@@ -1,5 +1,5 @@
-pretrained_path: /path/to/VoxCPM-0.5B/
-train_manifest: /path/to/train.jsonl
+pretrained_path: VoxCPM-0.5B/
+train_manifest: train.jsonl
 val_manifest: null
 sample_rate: 16000
 batch_size: 16
@@ -14,8 +14,8 @@ weight_decay: 0.01
 warmup_steps: 100
 max_steps: 2000
 max_batch_tokens: 8192  # Example: single batch can have at most 16k tokens, with batch_size=4, each sample can have at most 4096 tokens
-save_path: /path/to/checkpoints/finetune_all
-tensorboard: /path/to/logs/finetune_all
+save_path: checkpoints/finetune_all
+tensorboard: logs/finetune_all
 lambdas:
   loss/diff: 1.0
   loss/stop: 1.0
