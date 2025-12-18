@@ -163,6 +163,7 @@ def train(
 
     # Only print param info on rank 0 to avoid cluttered output
     if accelerator.rank == 0:
+        print("len(train_loader) =", len(train_loader))
         for name, param in model.named_parameters():
             print(name, param.requires_grad)
 
