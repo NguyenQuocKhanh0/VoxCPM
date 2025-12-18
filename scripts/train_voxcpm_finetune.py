@@ -176,6 +176,7 @@ def train(
     # - num_warmup_steps: warmup steps
     # - num_training_steps: total training steps (outer step count)
     total_training_steps = max_steps if max_steps > 0 else num_iters
+    print("total_training_steps: ", total_training_steps)
     scheduler = get_cosine_schedule_with_warmup(
         optimizer,
         num_warmup_steps=warmup_steps,
