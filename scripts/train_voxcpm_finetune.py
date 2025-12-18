@@ -195,6 +195,7 @@ def train(
         start_step = int(start_step_tensor.item())
     
     if start_step > 0 and accelerator.rank == 0:
+        print(f"Resuming training from step {start_step}")
         tracker.print(f"Resuming training from step {start_step}")
 
     # Resume tracker for signal handler to read current step
