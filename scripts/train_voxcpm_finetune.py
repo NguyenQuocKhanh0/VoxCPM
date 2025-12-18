@@ -350,74 +350,179 @@ def validate(model, val_loader, batch_processor, accelerator, tracker, lambdas):
     model.train()
 
 
-def load_checkpoint(model, optimizer, scheduler, save_dir: Path):
-    """
-    Load the latest checkpoint if it exists.
-    Returns the step number to resume from, or 0 if no checkpoint found.
-    """
-    latest_folder = save_dir / "latest"
-    if not latest_folder.exists():
-        return 0
+# def load_checkpoint(model, optimizer, scheduler, save_dir: Path):
+#     """
+#     Load the latest checkpoint if it exists.
+#     Returns the step number to resume from, or 0 if no checkpoint found.
+#     """
+#     latest_folder = save_dir / "latest"
+#     if not latest_folder.exists():
+#         return 0
     
-    unwrapped = model.module if hasattr(model, "module") else model
-    lora_cfg = unwrapped.lora_config
+#     unwrapped = model.module if hasattr(model, "module") else model
+#     lora_cfg = unwrapped.lora_config
     
-    # Load model weights
-    if lora_cfg is not None:
-        # LoRA: load lora_weights
-        lora_weights_path = latest_folder / "lora_weights.safetensors"
-        if not lora_weights_path.exists():
-            lora_weights_path = latest_folder / "lora_weights.ckpt"
+#     # Load model weights
+#     if lora_cfg is not None:
+#         # LoRA: load lora_weights
+#         lora_weights_path = latest_folder / "lora_weights.safetensors"
+#         if not lora_weights_path.exists():
+#             lora_weights_path = latest_folder / "lora_weights.ckpt"
         
-        if lora_weights_path.exists():
-            if lora_weights_path.suffix == ".safetensors":
-                from safetensors.torch import load_file
-                state_dict = load_file(str(lora_weights_path))
-            else:
-                ckpt = torch.load(lora_weights_path, map_location="cpu")
-                state_dict = ckpt.get("state_dict", ckpt)
+#         if lora_weights_path.exists():
+#             if lora_weights_path.suffix == ".safetensors":
+#                 from safetensors.torch import load_file
+#                 state_dict = load_file(str(lora_weights_path))
+#             else:
+#                 ckpt = torch.load(lora_weights_path, map_location="cpu")
+#                 state_dict = ckpt.get("state_dict", ckpt)
             
-            # Load only lora weights
-            unwrapped.load_state_dict(state_dict, strict=False)
-            print(f"Loaded LoRA weights from {lora_weights_path}")
+#             # Load only lora weights
+#             unwrapped.load_state_dict(state_dict, strict=False)
+#             print(f"Loaded LoRA weights from {lora_weights_path}")
+#     else:
+#         # Full finetune: load model.safetensors or pytorch_model.bin
+#         model_path = latest_folder / "model.safetensors"
+#         if not model_path.exists():
+#             model_path = latest_folder / "pytorch_model.bin"
+        
+#         if model_path.exists():
+#             if model_path.suffix == ".safetensors":
+#                 from safetensors.torch import load_file
+#                 state_dict = load_file(str(model_path))
+#             else:
+#                 ckpt = torch.load(model_path, map_location="cpu")
+#                 state_dict = ckpt.get("state_dict", ckpt)
+            
+#             unwrapped.load_state_dict(state_dict, strict=False)
+#             print(f"Loaded model weights from {model_path}")
+    
+#     # Load optimizer state
+#     optimizer_path = latest_folder / "optimizer.pth"
+#     if optimizer_path.exists():
+#         optimizer.load_state_dict(torch.load(optimizer_path, map_location="cpu"))
+#         print(f"Loaded optimizer state from {optimizer_path}")
+    
+#     # Load scheduler state
+#     scheduler_path = latest_folder / "scheduler.pth"
+#     if scheduler_path.exists():
+#         scheduler.load_state_dict(torch.load(scheduler_path, map_location="cpu"))
+#         print(f"Loaded scheduler state from {scheduler_path}")
+    
+#     # Try to infer step from checkpoint folders
+#     step_folders = [d for d in save_dir.iterdir() if d.is_dir() and d.name.startswith("step_")]
+#     if step_folders:
+#         steps = [int(d.name.split("_")[1]) for d in step_folders]
+#         resume_step = max(steps)
+#         print(f"Resuming from step {resume_step}")
+#         return resume_step
+    
+#     return 0
+import os
+import re
+from pathlib import Path
+import torch
+
+def load_checkpoint(model, optimizer, scheduler, save_dir: Path, resume_from_next_step: bool = True):
+    """
+    Tự tìm checkpoint mới nhất:
+      1) Ưu tiên step_XXXXXXX có số lớn nhất
+      2) Nếu không có step_*, fallback sang save_dir/latest (dir hoặc symlink hợp lệ)
+
+    Trả về step để bắt đầu loop. Mặc định trả về (last_step + 1) để không train lại step đã lưu.
+    """
+
+    save_dir = Path(save_dir)
+    latest_link = save_dir / "latest"
+
+    # -------------------------
+    # 1) Tìm step folder lớn nhất
+    # -------------------------
+    step_dirs = []
+    for d in save_dir.iterdir():
+        if d.is_dir():
+            m = re.match(r"^step_(\d+)$", d.name)
+            if m:
+                step_dirs.append((int(m.group(1)), d))
+    step_dirs.sort(key=lambda x: x[0], reverse=True)
+
+    ckpt_step = None
+    ckpt_dir = None
+
+    if step_dirs:
+        ckpt_step, ckpt_dir = step_dirs[0]
     else:
-        # Full finetune: load model.safetensors or pytorch_model.bin
-        model_path = latest_folder / "model.safetensors"
-        if not model_path.exists():
-            model_path = latest_folder / "pytorch_model.bin"
-        
-        if model_path.exists():
-            if model_path.suffix == ".safetensors":
-                from safetensors.torch import load_file
-                state_dict = load_file(str(model_path))
-            else:
-                ckpt = torch.load(model_path, map_location="cpu")
-                state_dict = ckpt.get("state_dict", ckpt)
-            
-            unwrapped.load_state_dict(state_dict, strict=False)
-            print(f"Loaded model weights from {model_path}")
-    
-    # Load optimizer state
-    optimizer_path = latest_folder / "optimizer.pth"
-    if optimizer_path.exists():
-        optimizer.load_state_dict(torch.load(optimizer_path, map_location="cpu"))
-        print(f"Loaded optimizer state from {optimizer_path}")
-    
-    # Load scheduler state
-    scheduler_path = latest_folder / "scheduler.pth"
-    if scheduler_path.exists():
-        scheduler.load_state_dict(torch.load(scheduler_path, map_location="cpu"))
-        print(f"Loaded scheduler state from {scheduler_path}")
-    
-    # Try to infer step from checkpoint folders
-    step_folders = [d for d in save_dir.iterdir() if d.is_dir() and d.name.startswith("step_")]
-    if step_folders:
-        steps = [int(d.name.split("_")[1]) for d in step_folders]
-        resume_step = max(steps)
-        print(f"Resuming from step {resume_step}")
-        return resume_step
-    
-    return 0
+        # -------------------------
+        # 2) Fallback latest (dir hoặc symlink)
+        # Path.exists() trả False nếu symlink bị hỏng, nên phải check is_symlink() riêng
+        # -------------------------
+        if latest_link.exists() and latest_link.is_dir():
+            ckpt_step, ckpt_dir = 0, latest_link
+        elif latest_link.is_symlink():
+            try:
+                target = os.readlink(str(latest_link))  # có thể là relative
+                target_path = Path(target)
+                if not target_path.is_absolute():
+                    target_path = save_dir / target_path
+                target_path = target_path.resolve()
+
+                if target_path.exists() and target_path.is_dir():
+                    ckpt_dir = target_path
+                    m = re.match(r"^step_(\d+)$", target_path.name)
+                    ckpt_step = int(m.group(1)) if m else 0
+            except OSError:
+                pass
+
+    if ckpt_dir is None:
+        print(f"No checkpoint found in {save_dir}")
+        return 0
+
+    # -------------------------
+    # Load weights
+    # -------------------------
+    unwrapped = model.module if hasattr(model, "module") else model
+    lora_cfg = getattr(unwrapped, "lora_config", None)
+
+    if lora_cfg is not None:
+        candidates = [ckpt_dir / "lora_weights.safetensors", ckpt_dir / "lora_weights.ckpt"]
+    else:
+        candidates = [ckpt_dir / "model.safetensors", ckpt_dir / "pytorch_model.bin"]
+
+    weights_path = next((p for p in candidates if p.exists()), None)
+    if weights_path is None:
+        print(f"Checkpoint folder found but missing weights file: {ckpt_dir}")
+        return 0
+
+    if weights_path.suffix == ".safetensors":
+        from safetensors.torch import load_file
+        state_dict = load_file(str(weights_path))
+    else:
+        ckpt = torch.load(weights_path, map_location="cpu")
+        state_dict = ckpt.get("state_dict", ckpt)
+
+    unwrapped.load_state_dict(state_dict, strict=False)
+    print(f"Loaded model weights from {weights_path}")
+
+    # -------------------------
+    # Load optimizer / scheduler (nếu có)
+    # -------------------------
+    opt_path = ckpt_dir / "optimizer.pth"
+    if opt_path.exists():
+        optimizer.load_state_dict(torch.load(opt_path, map_location="cpu"))
+        print(f"Loaded optimizer state from {opt_path}")
+
+    sch_path = ckpt_dir / "scheduler.pth"
+    if sch_path.exists():
+        scheduler.load_state_dict(torch.load(sch_path, map_location="cpu"))
+        print(f"Loaded scheduler state from {sch_path}")
+
+    # Step để resume
+    resume_step = int(ckpt_step or 0)
+    if resume_from_next_step and resume_step > 0:
+        resume_step += 1
+
+    print(f"Resuming from step {resume_step} (ckpt_dir={ckpt_dir})")
+    return resume_step
 
 
 def save_checkpoint(model, optimizer, scheduler, save_dir: Path, step: int, pretrained_path: str = None, hf_model_id: str = "", distribute: bool = False):
