@@ -110,25 +110,25 @@ def train(
     #   Samples exceeding this length will be dropped
     # ------------------------------------------------------------------ #
     print("chuẩn bị filtering")
-    if max_batch_tokens and max_batch_tokens > 0:
-        from voxcpm.training.data import compute_sample_lengths
+    # if max_batch_tokens and max_batch_tokens > 0:
+    #     from voxcpm.training.data import compute_sample_lengths
 
-        audio_vae_fps = base_model.audio_vae.sample_rate / base_model.audio_vae.hop_length
-        est_lengths = compute_sample_lengths(
-            train_ds,
-            audio_vae_fps=audio_vae_fps,
-            patch_size=base_model.config.patch_size,
-        )
-        max_sample_len = max_batch_tokens // batch_size if batch_size > 0 else max(est_lengths)
-        keep_indices = [i for i, L in enumerate(est_lengths) if L <= max_sample_len]
+    #     audio_vae_fps = base_model.audio_vae.sample_rate / base_model.audio_vae.hop_length
+    #     est_lengths = compute_sample_lengths(
+    #         train_ds,
+    #         audio_vae_fps=audio_vae_fps,
+    #         patch_size=base_model.config.patch_size,
+    #     )
+    #     max_sample_len = max_batch_tokens // batch_size if batch_size > 0 else max(est_lengths)
+    #     keep_indices = [i for i, L in enumerate(est_lengths) if L <= max_sample_len]
 
-        if len(keep_indices) < len(train_ds) and accelerator.rank == 0:
-            tracker.print(
-                f"Filtering {len(train_ds) - len(keep_indices)} / {len(train_ds)} "
-                f"training samples longer than {max_sample_len} tokens "
-                f"(max_batch_tokens={max_batch_tokens})."
-            )
-        train_ds = train_ds.select(keep_indices)
+    #     if len(keep_indices) < len(train_ds) and accelerator.rank == 0:
+    #         tracker.print(
+    #             f"Filtering {len(train_ds) - len(keep_indices)} / {len(train_ds)} "
+    #             f"training samples longer than {max_sample_len} tokens "
+    #             f"(max_batch_tokens={max_batch_tokens})."
+    #         )
+    #     train_ds = train_ds.select(keep_indices)
 
     train_loader = build_dataloader(
         train_ds,
