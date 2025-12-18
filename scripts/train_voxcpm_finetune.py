@@ -109,6 +109,7 @@ def train(
     #   max_sample_len = max_batch_tokens // batch_size
     #   Samples exceeding this length will be dropped
     # ------------------------------------------------------------------ #
+    print("chuẩn bị filtering")
     if max_batch_tokens and max_batch_tokens > 0:
         from voxcpm.training.data import compute_sample_lengths
 
