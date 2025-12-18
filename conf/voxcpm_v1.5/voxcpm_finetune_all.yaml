@@ -5,7 +5,7 @@ sample_rate: 44100
 batch_size: 8
 grad_accum_steps: 2  # Gradient accumulation steps, >1 can increase effective batch size without increasing memory
 num_workers: 16
-num_iters: 40000
+num_iters: 48455
 log_interval: 100
 valid_interval: 1000
 save_interval: 1000
