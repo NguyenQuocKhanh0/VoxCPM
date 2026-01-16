@@ -4,9 +4,9 @@ val_manifest: val.jsonl
 sample_rate: 44100
 batch_size: 32
 grad_accum_steps: 1  # Gradient accumulation steps, >1 can increase effective batch size without increasing memory
-num_workers: 8
+num_workers: 16
 num_iters: 50000
-log_interval: 10
+log_interval: 100
 valid_interval: 1000
 save_interval: 1000
 learning_rate: 0.0001  
