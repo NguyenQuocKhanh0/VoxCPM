@@ -1,21 +1,21 @@
-pretrained_path: /path/to/VoxCPM1.5/
-train_manifest: /path/to/train.jsonl
-val_manifest: null
+pretrained_path: VoxCPM1.5/
+train_manifest: train.jsonl
+val_manifest: val.jsonl
 sample_rate: 44100
-batch_size: 16
+batch_size: 32
 grad_accum_steps: 1  # Gradient accumulation steps, >1 can increase effective batch size without increasing memory
-num_workers: 2
-num_iters: 2000
+num_workers: 8
+num_iters: 50000
 log_interval: 10
 valid_interval: 1000
 save_interval: 1000
 learning_rate: 0.0001  
 weight_decay: 0.01
-warmup_steps: 100
-max_steps: 2000
+warmup_steps: 1000
+max_steps: 50000
 max_batch_tokens: 8192  # Example: single batch can have at most 16k tokens, with batch_size=4, each sample can have at most 4096 tokens
-save_path: /path/to/checkpoints/finetune_lora
-tensorboard: /path/to/logs/finetune_lora
+save_path: finetune_lora
+tensorboard: finetune_lora
 lambdas:
   loss/diff: 1.0
   loss/stop: 1.0
@@ -25,8 +25,8 @@ lora:
   enable_lm: true
   enable_dit: true
   enable_proj: false
-  r: 32               
-  alpha: 16           
+  r: 64               
+  alpha: 32           
   dropout: 0.0
 
 # Distribution options (optional)
