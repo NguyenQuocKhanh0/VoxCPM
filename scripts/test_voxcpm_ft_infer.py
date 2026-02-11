@@ -21,13 +21,24 @@ With voice cloning:
         --prompt_text "Reference audio transcript" \
         --output ft_clone.wav
 """
+import sys
+from pathlib import Path
+
+project_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(project_root / "src"))
+
+import argparse
+from pathlib import Path
+import soundfile as sf
+
+from voxcpm.core import VoxCPM   # <-- chú ý: voxcpm, không phải src.voxcpm
 
 import argparse
 from pathlib import Path
 
 import soundfile as sf
 
-from src.voxcpm.core import VoxCPM
+# from src.voxcpm.core import VoxCPM
 
 
 def parse_args():
