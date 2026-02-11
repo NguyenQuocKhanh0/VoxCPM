@@ -11,7 +11,7 @@ class VoxCPM:
             voxcpm_model_path : str,
             zipenhancer_model_path : str = "iic/speech_zipenhancer_ans_multiloss_16k_base",
             enable_denoiser : bool = True,
-            optimize: bool = True,
+            optimize: bool = False,
             lora_config: Optional[LoRAConfig] = None,
             lora_weights_path: Optional[str] = None,
         ):
