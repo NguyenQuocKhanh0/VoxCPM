@@ -137,6 +137,8 @@ class VoxCPM:
             text : str,
             prompt_wav_path : str = None,
             prompt_text : str = None,
+            duration_sec: float | None = None,
+            duration_patches: int | None = None,
             cfg_value : float = 2.0,    
             inference_timesteps : int = 10,
             min_len : int = 2,
@@ -212,6 +214,8 @@ class VoxCPM:
             generate_result = self.tts_model._generate_with_prompt_cache(
                             target_text=text,
                             prompt_cache=fixed_prompt_cache,
+                            target_duration_sec=duration_sec,
+                            target_duration_patches=duration_patches,
                             min_len=min_len,
                             max_len=max_len,
                             inference_timesteps=inference_timesteps,
