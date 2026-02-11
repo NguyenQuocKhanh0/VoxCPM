@@ -16,7 +16,7 @@ from torch.optim import AdamW
 from transformers import get_cosine_schedule_with_warmup
 import signal
 import os
-
+import random
 try:
     from safetensors.torch import save_file
     SAFETENSORS_AVAILABLE = True
@@ -56,6 +56,7 @@ def train(
     save_path: str = "checkpoints",
     tensorboard: str = "",
     lambdas: Dict[str, float] = {"loss/diff": 1.0, "loss/stop": 1.0},
+    duration_control: dict = None,
     lora: dict = None,
     config_path: str = "",
     # Distribution options (for LoRA checkpoints)
@@ -67,7 +68,10 @@ def train(
     # Validate distribution options
     if lora is not None and distribute and not hf_model_id:
         raise ValueError("hf_model_id is required when distribute=True")
-    
+    duration_control = duration_control or {}
+    dur_enabled = bool(duration_control.get("enabled", False))
+    dur_w = float(duration_control.get("duration_loss_weight", 0.0))
+
     accelerator = Accelerator(amp=True)
 
     save_dir = Path(save_path)
@@ -154,12 +158,20 @@ def train(
         audio_vae=base_model.audio_vae,
         dataset_cnt=dataset_cnt,
         device=accelerator.device,
+        duration_control=duration_control,
+        sample_rate=sample_rate,
     )
     del base_model.audio_vae
     model = accelerator.prepare_model(base_model)
     unwrapped_model = accelerator.unwrap(model)
     unwrapped_model.train()
 
+    # tempo_augment sẽ xử lý ở BatchProcessor (khuyến nghị) – xem phần dưới
+    tempo_aug = duration_control.get("tempo_augment", {"enabled": False})
+
+    # Make sure loss/duration is weighted correctly (otherwise default=1.0 in your loop)
+    lambdas = dict(lambdas)
+    lambdas["loss/duration"] = dur_w if dur_enabled else 0.0
 
     # Only print param info on rank 0 to avoid cluttered output
     if accelerator.rank == 0:
@@ -257,6 +269,9 @@ def train(
 
                 with sync_context:
                     with accelerator.autocast(dtype=torch.bfloat16):
+                        # duration_patches: use training-time audio length (in patches)
+                        # loss_mask shape: [B, T], 1 for audio tokens (patch steps)
+
                         outputs = model(
                             processed["text_tokens"],
                             processed["text_mask"],
@@ -266,6 +281,11 @@ def train(
                             processed["position_ids"],
                             processed["labels"],
                             progress=step / max(1, num_iters),
+                            duration_patches=(
+                                processed.get("duration_patches", None)
+                                if dur_enabled
+                                else None
+                            ),
                         )
 
                     total_loss = 0.0
@@ -334,6 +354,11 @@ def validate(model, val_loader, batch_processor, accelerator, tracker, lambdas):
                     processed["labels"],
                     progress=0.0,
                     sample_generate=False,
+                    duration_patches=(
+                        processed.get("duration_patches", None)
+                        if lambdas.get("loss/duration", 0.0) > 0
+                        else None
+                    ),
                 )
             total = 0.0
             for key, value in outputs.items():
