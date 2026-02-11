@@ -104,7 +104,7 @@ def main():
     model = VoxCPM.from_pretrained(
         hf_model_id=args.ckpt_dir,
         load_denoiser=False,
-        optimize=True,
+        optimize=False,
         local_files_only = True,
     )
 
