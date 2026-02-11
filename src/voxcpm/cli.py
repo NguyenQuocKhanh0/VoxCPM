@@ -136,6 +136,8 @@ def cmd_clone(args):
         cfg_value=args.cfg_value,
         inference_timesteps=args.inference_timesteps,
         normalize=args.normalize,
+        duration_sec=args.duration_sec,
+        duration_patches=args.duration_patches,
         denoise=args.denoise
     )
     
@@ -168,6 +170,8 @@ def cmd_synthesize(args):
         cfg_value=args.cfg_value,
         inference_timesteps=args.inference_timesteps,
         normalize=args.normalize,
+        duration_sec=args.duration_sec,
+        duration_patches=args.duration_patches,
         denoise=False  # 无参考音频时不需要降噪
     )
     
@@ -284,6 +288,9 @@ Examples:
     parser.add_argument("--lora-enable-lm", action="store_true", default=True, help="Apply LoRA to LM layers (default: True)")
     parser.add_argument("--lora-enable-dit", action="store_true", default=True, help="Apply LoRA to DiT layers (default: True)")
     parser.add_argument("--lora-enable-proj", action="store_true", default=False, help="Apply LoRA to projection layers (default: False)")
+    parser.add_argument("--duration-sec", type=float, default=None, help="Target audio duration (seconds)")
+    parser.add_argument("--duration-patches", type=int, default=None, help="Target length in patches (advanced)")
+
 
     return parser
 
