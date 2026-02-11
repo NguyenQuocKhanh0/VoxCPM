@@ -80,7 +80,19 @@ class VoxCPMConfig(BaseModel):
     device: str = "cuda"
     dtype: str = "bfloat16"
     dit_mean_mode: bool = False
+    duration_control: Optional["DurationControlConfig"] = None
 
+class DurationControlConfig(BaseModel):
+    enabled: bool = True
+    # "global": dùng target_patches cho mọi vị trí; "remaining": dùng remaining patches theo step
+    scheme: str = "remaining"
+    fourier_k: int = 64                 # tạo 2K features
+    max_target_patches: int = 4096      # clamp target
+    inject_to_lm: bool = True
+    inject_to_dit: bool = True
+    inject_to_stop: bool = True
+    hard_stop: bool = False            # nếu True: cut đúng target_patches (ít tự nhiên hơn)
+    duration_loss_weight: float = 0.1  # aux loss
 
 class LoRAConfig(BaseModel):
     enable_lm: bool = False        # Apply LoRA to base_lm + residual_lm
@@ -183,9 +195,45 @@ class VoxCPMModel(nn.Module):
         self.audio_vae = audio_vae
         self.chunk_size = audio_vae.chunk_size
         self.sample_rate = audio_vae.sample_rate
-
+        # Duration conditioning (optional)
+        self.duration_cfg = config.duration_control
+        if self.duration_cfg is not None and self.duration_cfg.enabled:
+            k = int(self.duration_cfg.fourier_k)
+            self.register_buffer("_dur_freqs", (2.0 ** torch.arange(k)) * math.pi, persistent=False)
+            self.duration_proj = nn.Linear(2 * k, config.lm_config.hidden_size)
+            self.duration_to_dit = nn.Linear(config.lm_config.hidden_size, config.dit_config.hidden_dim)
+            self.duration_pred_head = nn.Linear(config.lm_config.hidden_size, 1)
+            # init = 0 để tương thích checkpoint cũ (mặc định: không ảnh hưởng)
+            nn.init.zeros_(self.duration_proj.weight); nn.init.zeros_(self.duration_proj.bias)
+            nn.init.zeros_(self.duration_to_dit.weight); nn.init.zeros_(self.duration_to_dit.bias)
+            nn.init.zeros_(self.duration_pred_head.weight); nn.init.zeros_(self.duration_pred_head.bias)
+ 
         if self.lora_config is not None:
             self._apply_lora()
+    def _patches_per_second(self) -> float:
+        # robust: dùng AudioVAE sample_rate/chunk_size
+        frames_per_sec = float(self.sample_rate) / float(self.chunk_size)
+        return frames_per_sec / float(self.patch_size)
+
+    def _duration_sec_to_patches(self, duration_sec: torch.Tensor) -> torch.Tensor:
+        pps = self._patches_per_second()
+        patches = torch.round(duration_sec.float() * pps).long()
+        max_p = (self.duration_cfg.max_target_patches if self.duration_cfg else self.config.max_length)
+        return torch.clamp(patches, min=1, max=int(max_p))
+
+    def _duration_embed_from_patches(self, patches: torch.Tensor) -> torch.Tensor:
+        """
+        patches: shape [N] long/int
+        return: [N, lm_hidden]
+        """
+        if self.duration_cfg is None or not self.duration_cfg.enabled:
+            return None
+        max_p = float(self.duration_cfg.max_target_patches)
+        x = torch.log1p(patches.float()) / math.log1p(max_p)   # [N]
+        x = x.unsqueeze(-1)                                   # [N,1]
+        ang = x * self._dur_freqs.unsqueeze(0)                 # [N,K]
+        feat = torch.cat([torch.sin(ang), torch.cos(ang)], dim=-1)  # [N,2K]
+        return self.duration_proj(feat)                        # [N,H]
 
     def _apply_lora(self):
         """注入 LoRA 到 LM / DiT / 投影层"""
@@ -243,6 +291,8 @@ class VoxCPMModel(nn.Module):
         *,
         progress: float = 0.0,
         sample_generate: bool = False,
+        duration_sec: Optional[torch.Tensor] = None,
+        duration_patches: Optional[torch.Tensor] = None,
     ):
         del position_ids  # not used yet
 
@@ -252,6 +302,30 @@ class VoxCPMModel(nn.Module):
         audio_mask = audio_mask.to(self.device, dtype=self._dtype())
         loss_mask = loss_mask.to(self.device, dtype=self._dtype())
         labels = labels.to(self.device, dtype=torch.long)
+        # --- duration target (train) ---
+        dur_seq = None
+        dur_tgt_patches = None
+        if self.duration_cfg is not None and self.duration_cfg.enabled:
+            if duration_patches is not None:
+                dur_tgt_patches = duration_patches.to(self.device).long()
+            elif duration_sec is not None:
+                dur_tgt_patches = self._duration_sec_to_patches(duration_sec.to(self.device))
+            else:
+                # fallback: lấy từ loss_mask (số audio patch cần học)
+                dur_tgt_patches = torch.clamp(loss_mask.sum(dim=1).long(), min=1)
+
+            # per-token remaining patches embedding (recommended)
+            if self.duration_cfg.scheme == "remaining":
+                audio_idx = torch.cumsum(audio_mask.long(), dim=1) - 1  # text=-1, audio:0..La-1
+                remain = (dur_tgt_patches.unsqueeze(1) - (audio_idx + 1)).clamp(min=0)
+                # flatten -> embed -> reshape
+                dur_flat = self._duration_embed_from_patches(remain.view(-1))
+                dur_seq = dur_flat.view(remain.size(0), remain.size(1), -1)
+                # chỉ chèn vào vùng audio để tránh phá text encoding
+                dur_seq = dur_seq * audio_mask.unsqueeze(-1)
+            else:
+                dur_flat = self._duration_embed_from_patches(dur_tgt_patches)
+                dur_seq = dur_flat.unsqueeze(1)  # [B,1,H] broadcast sau
 
         B, T, P, D = audio_feats.shape
         feat_embed = self.feat_encoder(audio_feats)
@@ -262,6 +336,8 @@ class VoxCPMModel(nn.Module):
             scale_emb = 1.0
         text_embed = self.base_lm.embed_tokens(text_tokens) * scale_emb
         combined_embed = text_mask.unsqueeze(-1) * text_embed + audio_mask.unsqueeze(-1) * feat_embed
+        if dur_seq is not None and self.duration_cfg.inject_to_lm:
+            combined_embed = combined_embed + dur_seq
 
         enc_outputs, _ = self.base_lm(inputs_embeds=combined_embed, is_causal=True)
         enc_outputs = enc_outputs.to(self._dtype())
@@ -277,6 +353,10 @@ class VoxCPMModel(nn.Module):
         )
 
         dit_hidden = self.lm_to_dit_proj(lm_hidden) + self.res_to_dit_proj(residual_hidden)
+        if dur_seq is not None and self.duration_cfg.inject_to_dit:
+            # dur_seq ở LM space -> map sang DiT space
+            dit_hidden = dit_hidden + self.duration_to_dit(dur_seq)
+        
         dit_hidden = rearrange(dit_hidden, "b t c -> (b t) c")
 
         # Keep diffusion inputs in the same dtype as the model (e.g., bfloat16)
@@ -300,10 +380,21 @@ class VoxCPMModel(nn.Module):
             progress=progress,
         )
 
-        stop_logits = self.stop_head(self.stop_actn(self.stop_proj(lm_hidden)))
+        stop_inp = lm_hidden
+        if dur_seq is not None and self.duration_cfg.inject_to_stop:
+            stop_inp = stop_inp + dur_seq
+        stop_logits = self.stop_head(self.stop_actn(self.stop_proj(stop_inp)))
         stop_losses = self.stop_loss(stop_logits.transpose(1, 2), labels)
         denom = torch.clamp(loss_mask.sum(), min=1.0)
         stop_loss = (stop_losses * loss_mask).sum() / denom
+        # aux duration loss: dự đoán duration từ hidden ở vị trí audio_start_token (cuối text)
+        duration_loss = None
+        if dur_tgt_patches is not None and self.duration_cfg.duration_loss_weight > 0:
+            start_idx = text_mask.long().sum(dim=1) - 1  # vị trí audio_start_token
+            start_h = enc_outputs[torch.arange(enc_outputs.size(0), device=enc_outputs.device), start_idx]
+            pred = self.duration_pred_head(start_h).squeeze(-1)
+            tgt = torch.log1p(dur_tgt_patches.float())
+            duration_loss = F.smooth_l1_loss(pred, tgt, reduction="mean")
 
         feat_pred = None
         if sample_generate:
@@ -323,6 +414,7 @@ class VoxCPMModel(nn.Module):
         return {
             "loss/diff": diff_loss,
             "loss/stop": stop_loss,
+            "loss/duration": duration_loss if duration_loss is not None else torch.tensor(0.0, device=self.device),
             "feat_gt": feat_gt_tensor,
             "feat_pred": feat_pred,
         }
@@ -347,6 +439,8 @@ class VoxCPMModel(nn.Module):
         max_len: int = 2000,
         inference_timesteps: int = 10,
         cfg_value: float = 2.0,
+        target_duration_sec: Optional[float] = None,
+        target_duration_patches: Optional[int] = None,
         retry_badcase: bool = False,
         retry_badcase_max_times: int = 3,
         retry_badcase_ratio_threshold: float = 6.0, # setting acceptable ratio of audio length to text length (for badcase detection)
@@ -436,6 +530,13 @@ class VoxCPMModel(nn.Module):
         target_text_length = len(self.text_tokenizer(target_text))
         
         retry_badcase_times = 0
+        # duration -> override max_len (soft) ở inference
+        if (self.duration_cfg is not None and self.duration_cfg.enabled) and (target_duration_sec or target_duration_patches):
+            if target_duration_patches is None:
+                target_duration_patches = int(round(float(target_duration_sec) * self._patches_per_second()))
+            target_duration_patches = max(1, min(int(target_duration_patches), self.config.max_length))
+            max_len = min(max_len, target_duration_patches)
+
         while retry_badcase_times < retry_badcase_max_times:
             inference_result = self._inference(
                 text_token,
@@ -447,6 +548,7 @@ class VoxCPMModel(nn.Module):
                 inference_timesteps=inference_timesteps,
                 cfg_value=cfg_value,
                 streaming=streaming,
+                target_patches=target_duration_patches,
             )
             if streaming:
                 patch_len = self.patch_size * self.chunk_size
@@ -715,6 +817,7 @@ class VoxCPMModel(nn.Module):
         cfg_value: float = 2.0,
         streaming: bool = False,
         streaming_prefix_len: int = 3,
+        target_patches: Optional[int] = None,
     ) -> Generator[Tuple[torch.Tensor, Union[torch.Tensor, List[torch.Tensor]]], None, None]:
         """Core inference method for audio generation.
         
@@ -773,9 +876,18 @@ class VoxCPMModel(nn.Module):
 
 
         for i in tqdm(range(max_len)):
-            dit_hidden_1 = self.lm_to_dit_proj(lm_hidden)  # [b, h_dit]
-            dit_hidden_2 = self.res_to_dit_proj(residual_hidden)  # [b, h_dit]
+            # --- duration conditioning per step ---
+            dur_step = None
+            if self.duration_cfg is not None and self.duration_cfg.enabled and target_patches is not None:
+                remain = max(int(target_patches) - (i + 1), 0)
+                dur_step = self._duration_embed_from_patches(torch.tensor([remain], device=self.device)).squeeze(0)
+
+            dit_hidden_1 = self.lm_to_dit_proj(lm_hidden)
+            dit_hidden_2 = self.res_to_dit_proj(residual_hidden)
             dit_hidden = dit_hidden_1 + dit_hidden_2  # [b, h_dit]
+            if dur_step is not None and self.duration_cfg.inject_to_dit:
+                dit_hidden = dit_hidden + self.duration_to_dit(dur_step.unsqueeze(0))
+
 
             pred_feat = self.feat_decoder(
                 mu=dit_hidden,
@@ -800,12 +912,20 @@ class VoxCPMModel(nn.Module):
                 
                 yield feat_pred, pred_feat_seq
             
-            stop_flag = self.stop_head(self.stop_actn(self.stop_proj(lm_hidden))).argmax(dim=-1)[0].cpu().item()
+            stop_inp = lm_hidden
+            if dur_step is not None and self.duration_cfg.inject_to_stop:
+                stop_inp = stop_inp + dur_step.unsqueeze(0)
+            stop_flag = self.stop_head(self.stop_actn(self.stop_proj(stop_inp))).argmax(dim=-1)[0].cpu().item()
+            if target_patches is not None and self.duration_cfg.hard_stop and (i + 1) >= int(target_patches):
+                break
             if i > min_len and stop_flag == 1:
                 break
     
+            step_inp = curr_embed[:, 0, :]
+            if dur_step is not None and self.duration_cfg.inject_to_lm:
+                step_inp = step_inp + dur_step.unsqueeze(0)
             lm_hidden = self.base_lm.forward_step(
-                curr_embed[:, 0, :], torch.tensor([self.base_lm.kv_cache.step()], device=curr_embed.device)
+                step_inp, torch.tensor([self.base_lm.kv_cache.step()], device=curr_embed.device)
             ).clone()
            
 
@@ -841,7 +961,8 @@ class VoxCPMModel(nn.Module):
                     param.requires_grad = False
                     continue
                 if lora_config is not None:
-                    if "lora" not in name: # freeze non-LoRA weights
+                    # allow duration params to train even in LoRA mode (small + critical)
+                    if ("lora" not in name) and ("duration_" not in name):
                         param.requires_grad = False
         model.audio_vae = model.audio_vae.to(torch.float32)
         
