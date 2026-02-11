@@ -222,18 +222,25 @@ class VoxCPMModel(nn.Module):
         return torch.clamp(patches, min=1, max=int(max_p))
 
     def _duration_embed_from_patches(self, patches: torch.Tensor) -> torch.Tensor:
-        """
-        patches: shape [N] long/int
-        return: [N, lm_hidden]
-        """
         if self.duration_cfg is None or not self.duration_cfg.enabled:
             return None
+    
         max_p = float(self.duration_cfg.max_target_patches)
-        x = torch.log1p(patches.float()) / math.log1p(max_p)   # [N]
-        x = x.unsqueeze(-1)                                   # [N,1]
-        ang = x * self._dur_freqs.unsqueeze(0)                 # [N,K]
-        feat = torch.cat([torch.sin(ang), torch.cos(ang)], dim=-1)  # [N,2K]
-        return self.duration_proj(feat)                        # [N,H]
+    
+        # dùng dtype của model (vd bfloat16) để khớp với duration_proj
+        dtype = self.duration_proj.weight.dtype
+        device = self.duration_proj.weight.device
+    
+        patches = patches.to(device=device)
+        x = torch.log1p(patches.float()) / math.log1p(max_p)   # float32 OK
+        x = x.to(dtype=dtype)                                  # cast sang bf16
+        x = x.unsqueeze(-1)                                    # [N,1]
+    
+        freqs = self._dur_freqs.to(device=device, dtype=dtype) # freqs cũng cast bf16
+        ang = x * freqs.unsqueeze(0)                           # [N,K]
+    
+        feat = torch.cat([torch.sin(ang), torch.cos(ang)], dim=-1)  # [N,2K] bf16
+        return self.duration_proj(feat)                        # OK
 
     def _apply_lora(self):
         """注入 LoRA 到 LM / DiT / 投影层"""
