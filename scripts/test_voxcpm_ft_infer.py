@@ -126,8 +126,8 @@ def main():
         max_len=args.max_len,
         normalize=args.normalize,
         denoise=False,
-        duration_sec=args.target_duration_sec,
-        duration_patches=args.target_duration_patches,
+        target_duration_sec=args.target_duration_sec,
+        target_duration_patches=args.target_duration_patches,
     )
 
 
