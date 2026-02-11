@@ -20,7 +20,7 @@ limitations under the License.
 
 import os
 from typing import Tuple, Union, Generator, List, Optional
-
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -316,16 +316,18 @@ class VoxCPMModel(nn.Module):
 
             # per-token remaining patches embedding (recommended)
             if self.duration_cfg.scheme == "remaining":
-                audio_idx = torch.cumsum(audio_mask.long(), dim=1) - 1  # text=-1, audio:0..La-1
-                remain = (dur_tgt_patches.unsqueeze(1) - (audio_idx + 1)).clamp(min=0)
-                # flatten -> embed -> reshape
+                gen_idx = torch.cumsum(loss_mask.long(), dim=1) - 1          # text/prompt:-1, target:0..L-1
+                remain = (dur_tgt_patches.unsqueeze(1) - (gen_idx + 1)).clamp(min=0)
+            
                 dur_flat = self._duration_embed_from_patches(remain.view(-1))
                 dur_seq = dur_flat.view(remain.size(0), remain.size(1), -1)
-                # chỉ chèn vào vùng audio để tránh phá text encoding
-                dur_seq = dur_seq * audio_mask.unsqueeze(-1)
+            
+                dur_seq = dur_seq * loss_mask.unsqueeze(-1)                  # <-- dùng loss_mask
             else:
-                dur_flat = self._duration_embed_from_patches(dur_tgt_patches)
-                dur_seq = dur_flat.unsqueeze(1)  # [B,1,H] broadcast sau
+                dur_flat = self._duration_embed_from_patches(dur_tgt_patches) # [B,H]
+                dur_seq = dur_flat.unsqueeze(1)                               # [B,1,H]
+                dur_seq = dur_seq * loss_mask.unsqueeze(-1)                   # broadcast + mask
+            
 
         B, T, P, D = audio_feats.shape
         feat_embed = self.feat_encoder(audio_feats)
@@ -388,8 +390,8 @@ class VoxCPMModel(nn.Module):
         denom = torch.clamp(loss_mask.sum(), min=1.0)
         stop_loss = (stop_losses * loss_mask).sum() / denom
         # aux duration loss: dự đoán duration từ hidden ở vị trí audio_start_token (cuối text)
-        duration_loss = None
-        if dur_tgt_patches is not None and self.duration_cfg.duration_loss_weight > 0:
+        duration_loss = torch.tensor(0.0, device=self.device)
+        if dur_tgt_patches is not None and hasattr(self, "duration_pred_head"):
             start_idx = text_mask.long().sum(dim=1) - 1  # vị trí audio_start_token
             start_h = enc_outputs[torch.arange(enc_outputs.size(0), device=enc_outputs.device), start_idx]
             pred = self.duration_pred_head(start_h).squeeze(-1)
@@ -941,8 +943,10 @@ class VoxCPMModel(nn.Module):
             
 
     @classmethod
-    def from_local(cls, path: str, optimize: bool = True, training: bool = False, lora_config: LoRAConfig = None):
+    def from_local(cls, path: str, optimize: bool = True, training: bool = False, lora_config: LoRAConfig = None, duration_control: dict = None):
         config = VoxCPMConfig.model_validate_json(open(os.path.join(path, "config.json")).read())
+        if duration_control is not None:
+            config.duration_control = DurationControlConfig(**duration_control)
         tokenizer = LlamaTokenizerFast.from_pretrained(path)
         audio_vae_config = getattr(config, 'audio_vae_config', None)
         audio_vae = AudioVAE(config=audio_vae_config) if audio_vae_config else AudioVAE()
