@@ -27,7 +27,7 @@ from pathlib import Path
 
 import soundfile as sf
 
-from voxcpm.core import VoxCPM
+from src.voxcpm.core import VoxCPM
 
 
 def parse_args():
