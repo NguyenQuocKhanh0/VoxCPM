@@ -19,3 +19,18 @@ tensorboard: finetune_all
 lambdas:
   loss/diff: 1.0
   loss/stop: 1.0
+duration_control:
+  enabled: true
+  scheme: remaining
+  fourier_k: 64
+  max_target_patches: 4096
+  inject_to_lm: true
+  inject_to_dit: true
+  inject_to_stop: true
+  hard_stop: false
+  duration_loss_weight: 0.1
+  tempo_augment:
+    enabled: true
+    p: 0.7
+    min: 0.85
+    max: 1.15
