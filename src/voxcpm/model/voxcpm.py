@@ -686,6 +686,8 @@ class VoxCPMModel(nn.Module):
         retry_badcase: bool = False,
         retry_badcase_max_times: int = 3,
         retry_badcase_ratio_threshold: float = 6.0,
+        target_duration_sec: Optional[float] = None,        # <-- ADD
+        target_duration_patches: Optional[int] = None,      # <-- ADD
         streaming: bool = False,
     ) -> Generator[Tuple[torch.Tensor, torch.Tensor, Union[torch.Tensor, List[torch.Tensor]]], None, None]:
         """
@@ -757,6 +759,14 @@ class VoxCPMModel(nn.Module):
         # run inference
         target_text_length = len(self.text_tokenizer(target_text))
         retry_badcase_times = 0
+        # --- duration -> override max_len (soft) và truyền xuống _inference ---
+        if (self.duration_cfg is not None and self.duration_cfg.enabled) and (
+            target_duration_sec is not None or target_duration_patches is not None
+        ):
+            if target_duration_patches is None:
+                target_duration_patches = int(round(float(target_duration_sec) * self._patches_per_second()))
+            target_duration_patches = max(1, min(int(target_duration_patches), self.config.max_length))
+            max_len = min(max_len, target_duration_patches)
         while retry_badcase_times < retry_badcase_max_times:
             inference_result = self._inference(
                 text_token,
@@ -768,6 +778,7 @@ class VoxCPMModel(nn.Module):
                 inference_timesteps=inference_timesteps,
                 cfg_value=cfg_value,
                 streaming=streaming,
+                target_patches=target_duration_patches,
             )
             if streaming:
                 patch_len = self.patch_size * self.chunk_size
