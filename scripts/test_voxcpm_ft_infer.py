@@ -105,6 +105,7 @@ def main():
         hf_model_id=args.ckpt_dir,
         load_denoiser=False,
         optimize=True,
+        local_files_only = True,
     )
 
     # Run inference
