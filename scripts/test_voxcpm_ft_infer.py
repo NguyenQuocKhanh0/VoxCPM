@@ -85,6 +85,14 @@ def parse_args():
         action="store_true",
         help="Enable text normalization",
     )
+    # parse_args()
+    parser.add_argument("--target_duration_sec", type=float, default=None,
+                        help="Target duration in seconds (optional)")
+    parser.add_argument("--target_duration_patches", type=int, default=None,
+                        help="Target duration in patches (optional)")
+    parser.add_argument("--hard_stop", action="store_true",
+                        help="Force hard stop at target patches (if supported by config)")
+
     return parser.parse_args()
 
 
@@ -117,7 +125,10 @@ def main():
         max_len=args.max_len,
         normalize=args.normalize,
         denoise=False,
+        target_duration_sec=args.target_duration_sec,
+        target_duration_patches=args.target_duration_patches,
     )
+
 
     # Save audio
     out_path = Path(args.output)
