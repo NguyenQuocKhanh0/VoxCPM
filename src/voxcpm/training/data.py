@@ -1,12 +1,12 @@
 import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
-
+import random
 import argbind
 import torch
 from datasets import Audio, Dataset, DatasetDict, load_dataset
 from torch.utils.data import Dataset as TorchDataset
-
+import torchaudio
 from ..model.voxcpm import VoxCPMConfig
 from ..modules.audiovae import AudioVAE
 from .packers import AudioFeatureProcessingPacker
@@ -164,11 +164,17 @@ class BatchProcessor:
         audio_vae: AudioVAE,
         dataset_cnt: int,
         device: torch.device,
+        duration_control: Optional[dict] = None,
+        sample_rate: Optional[int] = None,
     ):
         self.device = device
         self.dataset_cnt = dataset_cnt
         self.audio_vae = audio_vae
         self.audio_vae.to(device)
+        self.sample_rate = int(sample_rate) if sample_rate is not None else int(getattr(audio_vae, "sample_rate", 44100))
+        self.duration_control = duration_control or {}
+        self.dur_enabled = bool(self.duration_control.get("enabled", False))
+        self.tempo_aug = self.duration_control.get("tempo_augment", {"enabled": False})
         self.packer = AudioFeatureProcessingPacker(
             dataset_cnt=dataset_cnt,
             max_len=config.max_length,
@@ -177,12 +183,51 @@ class BatchProcessor:
             audio_vae=self.audio_vae,
         )
 
+    def _maybe_tempo_augment(self, wav: torch.Tensor, sr: int) -> torch.Tensor:
+        """
+        Tempo augment WITHOUT pitch shift, using sox 'tempo'.
+        Expect wav shape [B, T] or [T]. Returns same dtype/device as input.
+        """
+        cfg = self.tempo_aug
+        if not cfg or not bool(cfg.get("enabled", False)):
+            return wav
+        p = float(cfg.get("p", 0.7))
+        if random.random() >= p:
+            return wav
+        fmin, fmax = float(cfg.get("min", 0.85)), float(cfg.get("max", 1.15))
+        factor = random.uniform(fmin, fmax)
+
+        # torchaudio sox expects [channels, time]
+        if wav.dim() == 1:
+            wav_ = wav.unsqueeze(0)
+        elif wav.dim() == 2:
+            # assume [B, T] -> treat as mono per sample by looping
+            # to keep batch semantics stable, apply per-sample
+            outs = []
+            for i in range(wav.size(0)):
+                x = wav[i].unsqueeze(0)
+                y, _ = torchaudio.sox_effects.apply_effects_tensor(x.cpu(), sr, effects=[["tempo", f"{factor}"]])
+                outs.append(y.squeeze(0))
+            return torch.nn.utils.rnn.pad_sequence(outs, batch_first=True).to(wav.device, wav.dtype)
+        else:
+            return wav
+
+        y, _ = torchaudio.sox_effects.apply_effects_tensor(wav_.cpu(), sr, effects=[["tempo", f"{factor}"]])
+        return y.squeeze(0).to(wav.device, wav.dtype) 
+
     def __call__(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        # audio_tokens here are raw waveform padded by collate_fn
         audio_tokens = batch["audio_tokens"].to(self.device)
         text_tokens = batch["text_tokens"].to(self.device)
         task_ids = batch["task_ids"].to(self.device)
         dataset_ids = batch["dataset_ids"].to(self.device)
-
+        # tempo augment BEFORE packer -> BEFORE audio_vae.encode
+        # Note: padding value from collate_fn is -100.0; packer should ignore via its own logic.
+        # If your packer treats -100 as valid samples, replace padding to 0 here.
+        if self.dur_enabled and self.tempo_aug.get("enabled", False):
+            # replace pad with 0 to avoid sox artifacts
+            audio_tokens = torch.where(audio_tokens == -100.0, torch.zeros_like(audio_tokens), audio_tokens)
+            audio_tokens = self._maybe_tempo_augment(audio_tokens, self.sample_rate)
         packed = self.packer(
             audio_tokens=audio_tokens,
             text_tokens=text_tokens,
@@ -190,6 +235,12 @@ class BatchProcessor:
             dataset_ids=dataset_ids,
             is_prompts=batch["is_prompts"],
         )
+        # duration_patches supervision:
+        # loss_mask is typically 1 for audio steps (patch tokens), 0 else.
+        # Use it as ground-truth target length for duration control.
+        if self.dur_enabled and "loss_mask" in packed:
+            # shape: [B]
+            packed["duration_patches"] = packed["loss_mask"].sum(dim=1).to(torch.long)
         return packed
 
 
