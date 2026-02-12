@@ -84,15 +84,18 @@ class VoxCPMConfig(BaseModel):
 
 class DurationControlConfig(BaseModel):
     enabled: bool = True
-    # "global": dùng target_patches cho mọi vị trí; "remaining": dùng remaining patches theo step
-    scheme: str = "remaining"
-    fourier_k: int = 64                 # tạo 2K features
-    max_target_patches: int = 4096      # clamp target
+    # "remaining": dùng số patch còn lại. "global": dùng 1 embedding tổng.
+    scheme: str = "remaining" 
+    # MỚI: "absolute" (đếm số nguyên 4096->0) hoặc "relative" (tiến độ 0.0->1.0)
+    mode: str = "relative"  
+    
+    fourier_k: int = 64
+    max_target_patches: int = 4096
     inject_to_lm: bool = True
     inject_to_dit: bool = True
     inject_to_stop: bool = True
-    hard_stop: bool = False            # nếu True: cut đúng target_patches (ít tự nhiên hơn)
-    duration_loss_weight: float = 0.1  # aux loss
+    hard_stop: bool = False
+    duration_loss_weight: float = 0.1
 
 class LoRAConfig(BaseModel):
     enable_lm: bool = False        # Apply LoRA to base_lm + residual_lm
@@ -221,27 +224,43 @@ class VoxCPMModel(nn.Module):
         max_p = (self.duration_cfg.max_target_patches if self.duration_cfg else self.config.max_length)
         return torch.clamp(patches, min=1, max=int(max_p))
 
-    def _duration_embed_from_patches(self, patches: torch.Tensor) -> torch.Tensor:
-        if self.duration_cfg is None or not self.duration_cfg.enabled:
-            return None
+    def _duration_embed_from_patches(self, inputs: torch.Tensor) -> torch.Tensor:
+            """
+            inputs: 
+              - Nếu mode='absolute': LongTensor [N] (số patch còn lại)
+              - Nếu mode='relative': FloatTensor [N] (tiến độ 0.0 -> 1.0)
+            """
+            if self.duration_cfg is None or not self.duration_cfg.enabled:
+                return None
+        
+            dtype = self.duration_proj.weight.dtype
+            device = self.duration_proj.weight.device
+            inputs = inputs.to(device=device)
     
-        max_p = float(self.duration_cfg.max_target_patches)
+            # Xử lý đầu vào tùy theo mode
+            if getattr(self.duration_cfg, "mode", "absolute") == "relative":
+                # Relative: inputs là float 0.0 -> 1.0
+                # Scale lên một chút để sin/cos có tần số tốt hơn, ví dụ nhân với 1000 hoặc max_patches
+                # Hoặc giữ nguyên nếu fourier_k đủ lớn để bắt tín hiệu nhỏ
+                x = inputs.float()  # [0, 1]
+            else:
+                # Absolute (Cũ): inputs là int [0, max_patches]
+                max_p = float(self.duration_cfg.max_target_patches)
+                x = torch.log1p(inputs.float()) / math.log1p(max_p)
     
-        # dùng dtype của model (vd bfloat16) để khớp với duration_proj
-        dtype = self.duration_proj.weight.dtype
-        device = self.duration_proj.weight.device
-    
-        patches = patches.to(device=device)
-        x = torch.log1p(patches.float()) / math.log1p(max_p)   # float32 OK
-        x = x.to(dtype=dtype)                                  # cast sang bf16
-        x = x.unsqueeze(-1)                                    # [N,1]
-    
-        freqs = self._dur_freqs.to(device=device, dtype=dtype) # freqs cũng cast bf16
-        ang = x * freqs.unsqueeze(0)                           # [N,K]
-    
-        feat = torch.cat([torch.sin(ang), torch.cos(ang)], dim=-1)  # [N,2K] bf16
-        return self.duration_proj(feat)                        # OK
-
+            x = x.to(dtype=dtype).unsqueeze(-1) # [N, 1]
+        
+            freqs = self._dur_freqs.to(device=device, dtype=dtype)
+            
+            # Với relative mode, ta có thể cần scale freqs lên để tạo đủ biến thiên
+            if getattr(self.duration_cfg, "mode", "absolute") == "relative":
+                # Scale tần số cho relative input để nó cover đủ chu kỳ
+                ang = x * freqs.unsqueeze(0) * math.pi 
+            else:
+                ang = x * freqs.unsqueeze(0)
+        
+            feat = torch.cat([torch.sin(ang), torch.cos(ang)], dim=-1)
+            return self.duration_proj(feat)
     def _apply_lora(self):
         """注入 LoRA 到 LM / DiT / 投影层"""
         cfg = self.lora_config
@@ -323,17 +342,28 @@ class VoxCPMModel(nn.Module):
 
             # per-token remaining patches embedding (recommended)
             if self.duration_cfg.scheme == "remaining":
-                gen_idx = torch.cumsum(loss_mask.long(), dim=1) - 1          # text/prompt:-1, target:0..L-1
-                remain = (dur_tgt_patches.unsqueeze(1) - (gen_idx + 1)).clamp(min=0)
-            
-                dur_flat = self._duration_embed_from_patches(remain.view(-1))
-                dur_seq = dur_flat.view(remain.size(0), remain.size(1), -1)
-            
-                dur_seq = dur_seq * loss_mask.unsqueeze(-1)                  # <-- dùng loss_mask
-            else:
-                dur_flat = self._duration_embed_from_patches(dur_tgt_patches) # [B,H]
-                dur_seq = dur_flat.unsqueeze(1)                               # [B,1,H]
-                dur_seq = dur_seq * loss_mask.unsqueeze(-1)                   # broadcast + mask
+                gen_idx = torch.cumsum(loss_mask.long(), dim=1) - 1 
+                
+                if getattr(self.duration_cfg, "mode", "absolute") == "relative":
+                    # Cách mới: Tính % tiến độ
+                    # dur_tgt_patches shape [B], gen_idx shape [B, T]
+                    # Clamp min=1e-5 để tránh chia cho 0
+                    total_len = dur_tgt_patches.unsqueeze(1).float().clamp(min=1e-5)
+                    # Progress chạy từ 0.0 đến 1.0
+                    progress = (gen_idx.float() + 1) / total_len
+                    # Đảm bảo không vượt quá 1.0 (do padding/masking)
+                    progress = progress.clamp(0.0, 1.0)
+                    
+                    dur_flat = self._duration_embed_from_patches(progress.view(-1))
+                else:
+                    # Cách cũ: Absolute countdown
+                    remain = (dur_tgt_patches.unsqueeze(1) - (gen_idx + 1)).clamp(min=0)
+                    dur_flat = self._duration_embed_from_patches(remain.view(-1))
+
+                dur_seq = dur_flat.view(gen_idx.size(0), gen_idx.size(1), -1)
+                
+                dur_mask = (text_mask + audio_mask).clamp(0, 1)
+                dur_seq = dur_seq * dur_mask.unsqueeze(-1)
             
 
         B, T, P, D = audio_feats.shape
@@ -872,6 +902,18 @@ class VoxCPMModel(nn.Module):
        
         text_embed = self.base_lm.embed_tokens(text) * scale_emb
         combined_embed = text_mask.unsqueeze(-1) * text_embed + feat_mask.unsqueeze(-1) * feat_embed
+        # --- inject duration vào prefix pass của LM ---
+        if (self.duration_cfg is not None and self.duration_cfg.enabled
+            and target_patches is not None
+            and self.duration_cfg.inject_to_lm):
+        
+            # 1 vector duration cho toàn prefix (step 0)
+            dur0 = self._duration_embed_from_patches(
+                torch.tensor([int(target_patches)], device=self.device)
+            )  # [1,H]
+        
+            combined_embed = combined_embed + dur0.to(combined_embed.dtype).unsqueeze(1)  # broadcast [B,T,H]
+
 
         prefix_feat_cond = feat[:, -1, ...]  # b, p, d
         pred_feat_seq = []  # b, t, p, d
@@ -899,8 +941,20 @@ class VoxCPMModel(nn.Module):
             # --- duration conditioning per step ---
             dur_step = None
             if self.duration_cfg is not None and self.duration_cfg.enabled and target_patches is not None:
-                remain = max(int(target_patches) - (i + 1), 0)
-                dur_step = self._duration_embed_from_patches(torch.tensor([remain], device=self.device)).squeeze(0)
+                if getattr(self.duration_cfg, "mode", "absolute") == "relative":
+                    # Relative Mode: Tiến độ hiện tại
+                    # i chạy từ 0, target_patches là tổng số bước mong muốn
+                    curr_progress = float(i + 1) / float(target_patches)
+                    curr_progress = min(curr_progress, 1.0)
+                    dur_step = self._duration_embed_from_patches(
+                        torch.tensor([curr_progress], device=self.device)
+                    ).squeeze(0)
+                else:
+                    # Absolute Mode (Cũ)
+                    remain = max(int(target_patches) - (i + 1), 0)
+                    dur_step = self._duration_embed_from_patches(
+                        torch.tensor([remain], device=self.device)
+                    ).squeeze(0)
 
             dit_hidden_1 = self.lm_to_dit_proj(lm_hidden)
             dit_hidden_2 = self.res_to_dit_proj(residual_hidden)
