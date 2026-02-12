@@ -1,5 +1,3 @@
---- START OF FILE Paste February 12, 2026 - 2:40PM ---
-
 """
 VoxCPM: A Tokenizer-free speech generation model
 
