@@ -483,6 +483,7 @@ class VoxCPMModel(nn.Module):
         cfg_value: float = 2.0,
         target_duration_sec: Optional[float] = None,
         target_duration_patches: Optional[int] = None,
+        duration_guidance_scale: float = 1.0,  # New parameter
         retry_badcase: bool = False,
         retry_badcase_max_times: int = 3,
         retry_badcase_ratio_threshold: float = 6.0, # setting acceptable ratio of audio length to text length (for badcase detection)
@@ -578,7 +579,7 @@ class VoxCPMModel(nn.Module):
                 target_duration_patches = int(round(float(target_duration_sec) * self._patches_per_second()))
             target_duration_patches = max(1, min(int(target_duration_patches), self.config.max_length))
             # max_len = min(max_len, target_duration_patches)
-        print("target_duration_patches: ", target_duration_patches)
+
         while retry_badcase_times < retry_badcase_max_times:
             inference_result = self._inference(
                 text_token,
@@ -591,6 +592,7 @@ class VoxCPMModel(nn.Module):
                 cfg_value=cfg_value,
                 streaming=streaming,
                 target_patches=target_duration_patches,
+                duration_guidance_scale=duration_guidance_scale, # New
             )
             if streaming:
                 patch_len = self.patch_size * self.chunk_size
@@ -728,6 +730,7 @@ class VoxCPMModel(nn.Module):
         retry_badcase_ratio_threshold: float = 6.0,
         target_duration_sec: Optional[float] = None,        # <-- ADD
         target_duration_patches: Optional[int] = None,      # <-- ADD
+        duration_guidance_scale: float = 1.0,               # <-- ADD
         streaming: bool = False,
     ) -> Generator[Tuple[torch.Tensor, torch.Tensor, Union[torch.Tensor, List[torch.Tensor]]], None, None]:
         """
@@ -807,7 +810,6 @@ class VoxCPMModel(nn.Module):
                 target_duration_patches = int(round(float(target_duration_sec) * self._patches_per_second()))
             target_duration_patches = max(1, min(int(target_duration_patches), self.config.max_length))
             # max_len = min(max_len, target_duration_patches)
-        print("target_duration_patches: ", target_duration_patches)
         while retry_badcase_times < retry_badcase_max_times:
             inference_result = self._inference(
                 text_token,
@@ -820,6 +822,7 @@ class VoxCPMModel(nn.Module):
                 cfg_value=cfg_value,
                 streaming=streaming,
                 target_patches=target_duration_patches,
+                duration_guidance_scale=duration_guidance_scale, # New
             )
             if streaming:
                 patch_len = self.patch_size * self.chunk_size
@@ -872,6 +875,7 @@ class VoxCPMModel(nn.Module):
         streaming: bool = False,
         streaming_prefix_len: int = 3,
         target_patches: Optional[int] = None,
+        duration_guidance_scale: float = 1.0,
     ) -> Generator[Tuple[torch.Tensor, Union[torch.Tensor, List[torch.Tensor]]], None, None]:
         """Core inference method for audio generation.
         
@@ -915,6 +919,9 @@ class VoxCPMModel(nn.Module):
             dur0 = self._duration_embed_from_patches(
                 torch.tensor([int(target_patches)], device=self.device)
             )  # [1,H]
+            
+            # Apply scale here too? Optional, but likely helpful for start token.
+            dur0 = dur0 * duration_guidance_scale
         
             combined_embed = combined_embed + dur0.to(combined_embed.dtype).unsqueeze(1)  # broadcast [B,T,H]
 
@@ -959,6 +966,10 @@ class VoxCPMModel(nn.Module):
                     dur_step = self._duration_embed_from_patches(
                         torch.tensor([remain], device=self.device)
                     ).squeeze(0)
+                
+                # Boost the signal to force model to respect it
+                if duration_guidance_scale != 1.0:
+                    dur_step = dur_step * duration_guidance_scale
 
             dit_hidden_1 = self.lm_to_dit_proj(lm_hidden)
             dit_hidden_2 = self.res_to_dit_proj(residual_hidden)
