@@ -24,9 +24,10 @@ duration_control:
   scheme: remaining
   fourier_k: 64
   max_target_patches: 4096
+  mode: relative
   inject_to_lm: true
-  inject_to_dit: true
-  inject_to_stop: true
+  inject_to_dit: false
+  inject_to_stop: false
   hard_stop: false
   duration_loss_weight: 0.1
   tempo_augment:
