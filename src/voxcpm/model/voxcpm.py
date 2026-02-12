@@ -1,3 +1,5 @@
+--- START OF FILE Paste February 12, 2026 - 2:40PM ---
+
 """
 VoxCPM: A Tokenizer-free speech generation model
 
@@ -410,6 +412,9 @@ class VoxCPMModel(nn.Module):
 
         loss_seq_mask = loss_mask.unsqueeze(-1).repeat(1, 1, self.patch_size)
         loss_seq_mask = rearrange(loss_seq_mask, "b t p -> (b t) p 1").to(target_dtype)
+
+        if isinstance(progress, torch.Tensor) and progress.ndim == 2:
+            progress = progress.view(-1)
 
         diff_loss = self.feat_decoder.compute_loss(
             feat_gt.transpose(1, 2).contiguous(),
