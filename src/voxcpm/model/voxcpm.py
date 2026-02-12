@@ -544,7 +544,7 @@ class VoxCPMModel(nn.Module):
             if target_duration_patches is None:
                 target_duration_patches = int(round(float(target_duration_sec) * self._patches_per_second()))
             target_duration_patches = max(1, min(int(target_duration_patches), self.config.max_length))
-            max_len = min(max_len, target_duration_patches)
+            # max_len = min(max_len, target_duration_patches)
 
         while retry_badcase_times < retry_badcase_max_times:
             inference_result = self._inference(
@@ -773,7 +773,7 @@ class VoxCPMModel(nn.Module):
             if target_duration_patches is None:
                 target_duration_patches = int(round(float(target_duration_sec) * self._patches_per_second()))
             target_duration_patches = max(1, min(int(target_duration_patches), self.config.max_length))
-            max_len = min(max_len, target_duration_patches)
+            # max_len = min(max_len, target_duration_patches)
         while retry_badcase_times < retry_badcase_max_times:
             inference_result = self._inference(
                 text_token,
