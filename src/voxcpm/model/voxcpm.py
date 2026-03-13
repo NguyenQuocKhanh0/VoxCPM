@@ -801,17 +801,16 @@ class VoxCPMModel(nn.Module):
             stop_flag = int(stop_prob >= stop_threshold)
     
             # chưa đạt số step tối thiểu thì cấm stop
-            if i < forced_min_steps:
-                print("chưa stop")
-                stop_streak = 0
+
+            if stop_flag == 1:
+                stop_streak += 1
+                print("chặn stop")
             else:
-                if stop_flag == 1:
-                    stop_streak += 1
-                else:
-                    stop_streak = 0
-    
-                if stop_streak >= require_stop_consecutive:
-                    break
+                stop_streak = 0
+
+            if stop_streak >= require_stop_consecutive:
+                print("đủ stop")
+                break
     
             lm_hidden = self.base_lm.forward_step(
                 curr_embed[:, 0, :],
