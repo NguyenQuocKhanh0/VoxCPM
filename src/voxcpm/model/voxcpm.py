@@ -715,108 +715,111 @@ class VoxCPMModel(nn.Module):
         cfg_value: float = 2.0,
         streaming: bool = False,
         streaming_prefix_len: int = 3,
+    
+        # thêm mới
+        extra_stop_sec: float = 0.5,          # ép model chạy thêm ~0.5s trước khi được phép stop
+        stop_threshold: float = 0.8,          # xác suất stop phải đủ cao mới dừng
+        require_stop_consecutive: int = 3,    # cần stop liên tiếp N lần
     ) -> Generator[Tuple[torch.Tensor, Union[torch.Tensor, List[torch.Tensor]]], None, None]:
-        """Core inference method for audio generation.
-        
-        This is the main inference loop that generates audio features
-        using the language model and diffusion transformer.
-        
-        Args:
-            text: Input text tokens
-            text_mask: Mask for text tokens
-            feat: Input audio features
-            feat_mask: Mask for audio features
-            min_len: Minimum generation length
-            max_len: Maximum generation length
-            inference_timesteps: Number of diffusion steps
-            cfg_value: Classifier-free guidance value
-            streaming: Whether to yield each step latent feature or just the final result
-            
-        Returns:
-            Generator of Tuple containing:
-                - Predicted latent feature at the current step if ``streaming=True``, else final latent features
-                - Predicted audio feature sequence so far as a List if ``streaming=True``, else as a concatenated Tensor
-        """
         B, T, P, D = feat.shape
-
+    
         feat_embed = self.feat_encoder(feat)  # [b, t, h_feat]
         feat_embed = self.enc_to_lm_proj(feat_embed)
-        
+    
         if self.config.lm_config.use_mup:
             scale_emb = self.config.lm_config.scale_emb
         else:
             scale_emb = 1.0
-       
+    
         text_embed = self.base_lm.embed_tokens(text) * scale_emb
         combined_embed = text_mask.unsqueeze(-1) * text_embed + feat_mask.unsqueeze(-1) * feat_embed
-
+    
         prefix_feat_cond = feat[:, -1, ...]  # b, p, d
-        pred_feat_seq = []  # b, t, p, d
+        pred_feat_seq = []
         curr_embed = None
-
+    
         enc_outputs, kv_cache_tuple = self.base_lm(
             inputs_embeds=combined_embed,
             is_causal=True,
         )
         self.base_lm.kv_cache.fill_caches(kv_cache_tuple)
-        
+    
         enc_outputs = self.fsq_layer(enc_outputs) * feat_mask.unsqueeze(-1) + enc_outputs * text_mask.unsqueeze(-1)
         lm_hidden = enc_outputs[:, -1, :]
-
-         
+    
         residual_enc_outputs, residual_kv_cache_tuple = self.residual_lm(
             inputs_embeds=enc_outputs + feat_mask.unsqueeze(-1) * feat_embed,
             is_causal=True,
         )
         self.residual_lm.kv_cache.fill_caches(residual_kv_cache_tuple)
         residual_hidden = residual_enc_outputs[:, -1, :]
-
-
+    
+        # ===== đổi giây -> latent steps =====
+        seconds_per_step = (self.patch_size * self.chunk_size) / float(self.sample_rate)
+        extra_steps = max(0, math.ceil(extra_stop_sec / seconds_per_step))
+    
+        # số step tối thiểu trước khi được phép stop
+        forced_min_steps = min_len + extra_steps
+    
+        stop_streak = 0
+    
         for i in tqdm(range(max_len)):
-            dit_hidden_1 = self.lm_to_dit_proj(lm_hidden)  # [b, h_dit]
-            dit_hidden_2 = self.res_to_dit_proj(residual_hidden)  # [b, h_dit]
-            dit_hidden = dit_hidden_1 + dit_hidden_2  # [b, h_dit]
-
+            dit_hidden_1 = self.lm_to_dit_proj(lm_hidden)
+            dit_hidden_2 = self.res_to_dit_proj(residual_hidden)
+            dit_hidden = dit_hidden_1 + dit_hidden_2
+    
             pred_feat = self.feat_decoder(
                 mu=dit_hidden,
                 patch_size=self.patch_size,
                 cond=prefix_feat_cond.transpose(1, 2).contiguous(),
                 n_timesteps=inference_timesteps,
                 cfg_value=cfg_value,
-            ).transpose(
-                1, 2
-            )  # [b, p, d]
-            
+            ).transpose(1, 2)  # [b, p, d]
+    
             curr_embed = self.feat_encoder(pred_feat.unsqueeze(1))  # b, 1, c
             curr_embed = self.enc_to_lm_proj(curr_embed)
-            
-            pred_feat_seq.append(pred_feat.unsqueeze(1))  # b, 1, p, d
+    
+            pred_feat_seq.append(pred_feat.unsqueeze(1))
             prefix_feat_cond = pred_feat
-
+    
             if streaming:
-                # return the last three predicted latent features to provide enough context for smooth decoding
                 pred_feat_chunk = torch.cat(pred_feat_seq[-streaming_prefix_len:], dim=1)
                 feat_pred = rearrange(pred_feat_chunk, "b t p d -> b d (t p)", b=B, p=self.patch_size)
-                
                 yield feat_pred, pred_feat_seq
-            
-            stop_flag = self.stop_head(self.stop_actn(self.stop_proj(lm_hidden))).argmax(dim=-1)[0].cpu().item()
-            if i > min_len and stop_flag == 1:
-                break
+    
+            # ===== stop logic mềm hơn =====
+            stop_logits = self.stop_head(self.stop_actn(self.stop_proj(lm_hidden)))  # [b, 2] giả sử 0=continue, 1=stop
+            stop_probs = torch.softmax(stop_logits, dim=-1)
+            stop_prob = stop_probs[0, 1].item()
+            stop_flag = int(stop_prob >= stop_threshold)
+    
+            # chưa đạt số step tối thiểu thì cấm stop
+            if i < forced_min_steps:
+                stop_streak = 0
+            else:
+                if stop_flag == 1:
+                    stop_streak += 1
+                else:
+                    stop_streak = 0
+    
+                if stop_streak >= require_stop_consecutive:
+                    break
     
             lm_hidden = self.base_lm.forward_step(
-                curr_embed[:, 0, :], torch.tensor([self.base_lm.kv_cache.step()], device=curr_embed.device)
+                curr_embed[:, 0, :],
+                torch.tensor([self.base_lm.kv_cache.step()], device=curr_embed.device),
             ).clone()
-           
-
+    
             lm_hidden = self.fsq_layer(lm_hidden)
+    
             residual_hidden = self.residual_lm.forward_step(
-                lm_hidden + curr_embed[:, 0, :], torch.tensor([self.residual_lm.kv_cache.step()], device=curr_embed.device)
+                lm_hidden + curr_embed[:, 0, :],
+                torch.tensor([self.residual_lm.kv_cache.step()], device=curr_embed.device),
             ).clone()
-                
+    
         if not streaming:
-            pred_feat_seq = torch.cat(pred_feat_seq, dim=1)  # b, t, p, d
-            feat_pred = rearrange(pred_feat_seq, "b t p d -> b d (t p)", b=B, p=self.patch_size)  
+            pred_feat_seq = torch.cat(pred_feat_seq, dim=1)
+            feat_pred = rearrange(pred_feat_seq, "b t p d -> b d (t p)", b=B, p=self.patch_size)
             yield feat_pred, pred_feat_seq.squeeze(0).cpu()
             
 
