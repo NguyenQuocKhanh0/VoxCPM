@@ -803,6 +803,7 @@ class VoxCPMModel(nn.Module):
             # chưa đạt số step tối thiểu thì cấm stop
 
             if stop_flag == 1:
+                print("stop_prob: ",stop_prob)
                 stop_streak += 1
                 print("chặn stop")
             else:
