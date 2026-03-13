@@ -721,9 +721,9 @@ class VoxCPMModel(nn.Module):
         streaming_prefix_len: int = 3,
     
         # thêm mới
-        extra_stop_sec: float = 0.5,          # ép model chạy thêm ~0.5s trước khi được phép stop
-        stop_threshold: float = 0.8,          # xác suất stop phải đủ cao mới dừng
-        require_stop_consecutive: int = 3,    # cần stop liên tiếp N lần
+        extra_stop_sec: float = 0.2,          # ép model chạy thêm ~0.5s trước khi được phép stop
+        stop_threshold: float = 0.99,          # xác suất stop phải đủ cao mới dừng
+        require_stop_consecutive: int = 2,    # cần stop liên tiếp N lần
     ) -> Generator[Tuple[torch.Tensor, Union[torch.Tensor, List[torch.Tensor]]], None, None]:
         B, T, P, D = feat.shape
     
