@@ -755,11 +755,14 @@ class VoxCPMModel(nn.Module):
         residual_hidden = residual_enc_outputs[:, -1, :]
     
         # ===== đổi giây -> latent steps =====
+        
         seconds_per_step = (self.patch_size * self.chunk_size) / float(self.sample_rate)
+        print("seconds_per_step: ",seconds_per_step)
         extra_steps = max(0, math.ceil(extra_stop_sec / seconds_per_step))
     
         # số step tối thiểu trước khi được phép stop
         forced_min_steps = min_len + extra_steps
+        print("forced_min_steps: ",forced_min_steps)
     
         stop_streak = 0
     
@@ -795,6 +798,7 @@ class VoxCPMModel(nn.Module):
     
             # chưa đạt số step tối thiểu thì cấm stop
             if i < forced_min_steps:
+                print("chưa stop")
                 stop_streak = 0
             else:
                 if stop_flag == 1:
