@@ -98,7 +98,7 @@ def mask_multichar_chinese_tokens(tokenizer: PreTrainedTokenizer):
             try:
                 tokens = self.tokenize(text, **kwargs)
                 result = self.tokenizer.convert_tokens_to_ids(tokens)
-                print(result)
+                # print(result)
                 return result
             except Exception as e:
                 raise ValueError(f"Tokenization failed: {str(e)}") from e
