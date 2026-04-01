@@ -723,7 +723,7 @@ class VoxCPMModel(nn.Module):
         # thêm mới
         extra_stop_sec: float = 0.2,          # ép model chạy thêm ~0.5s trước khi được phép stop
         stop_threshold: float = 0.99,          # xác suất stop phải đủ cao mới dừng
-        require_stop_consecutive: int = 2,    # cần stop liên tiếp N lần
+        require_stop_consecutive: int = 3,    # cần stop liên tiếp N lần
     ) -> Generator[Tuple[torch.Tensor, Union[torch.Tensor, List[torch.Tensor]]], None, None]:
         B, T, P, D = feat.shape
     
@@ -806,8 +806,8 @@ class VoxCPMModel(nn.Module):
                 print("stop_prob: ",stop_prob)
                 stop_streak += 1
                 print("chặn stop")
-            else:
-                stop_streak = 0
+            # else:
+            #     stop_streak = 0
 
             if stop_streak >= require_stop_consecutive:
                 print("đủ stop")
