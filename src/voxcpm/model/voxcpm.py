@@ -769,6 +769,7 @@ class VoxCPMModel(nn.Module):
         print("forced_min_steps: ",forced_min_steps)
     
         stop_streak = 0
+        pau = 0
     
         for i in tqdm(range(max_len)):
             dit_hidden_1 = self.lm_to_dit_proj(lm_hidden)
@@ -806,6 +807,10 @@ class VoxCPMModel(nn.Module):
                 print("stop_prob: ",stop_prob)
                 stop_streak += 1
                 print("chặn stop")
+            if stop_streak != 0:
+                pau = pau + 1
+            if pau > 3:
+                break
             # else:
             #     stop_streak = 0
 
